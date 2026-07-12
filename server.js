@@ -5,7 +5,7 @@ import { createClient } from '@supabase/supabase-js';
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Supabase 客户端
+// ========== Supabase 客户端 ==========
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_ANON_KEY
@@ -14,19 +14,30 @@ const supabase = createClient(
 app.use(cors());
 app.use(express.json());
 
-// 健康检查
+// ========== 健康检查 ==========
 app.get('/health', async (req, res) => {
-  const { data, error } = await supabase.from('settings').select('*').limit(1);
+  const { error } = await supabase.from('settings').select('*').limit(1);
   if (error) {
     return res.status(500).json({ status: 'error', message: '数据库连接失败', detail: error.message });
   }
   res.json({ status: 'ok', message: '服务正常，数据库已连接' });
 });
 
-// 聊天接口（支持豆包）
+// ========== 辅助函数：获取或创建设置 ==========
+async function getSettings() {
+  const { data } = await supabase.from('settings').select('*').limit(1).single();
+  return data || {
+    system_prompt: '你是一个贴心、知识渊博的AI助手，回答简洁生动，富有温度。',
+    temperature: 0.7,
+    max_context_rounds: 20,
+    max_reply_tokens: 1024
+  };
+}
+
+// ========== 核心聊天接口 ==========
 app.post('/api/chat', async (req, res) => {
   try {
-    const { message } = req.body;
+    const { message, sessionId } = req.body;
     const apiKey = process.env.DOUBAO_API_KEY;
     const modelId = process.env.DOUBAO_MODEL_ID;
 
@@ -34,6 +45,43 @@ app.post('/api/chat', async (req, res) => {
       return res.status(500).json({ error: '豆包 API Key 或模型 ID 未配置' });
     }
 
+    // ----- 1. 如果没有 sessionId，自动创建新会话 -----
+    let currentSessionId = sessionId;
+    if (!currentSessionId) {
+      const { data: newSession } = await supabase
+        .from('sessions')
+        .insert({ name: message.slice(0, 25) + (message.length > 25 ? '...' : '') })
+        .select('id')
+        .single();
+      currentSessionId = newSession.id;
+    }
+
+    // ----- 2. 存入用户消息 -----
+    await supabase.from('messages').insert({
+      sessionid: currentSessionId,
+      role: 'user',
+      content: message
+    });
+
+    // ----- 3. 加载历史消息（最近20轮）-----
+    const { data: historyMessages } = await supabase
+      .from('messages')
+      .select('role, content')
+      .eq('sessionid', currentSessionId)
+      .eq('visible', true)
+      .order('created_at', { ascending: true })
+      .limit(40); // 20轮 = 40条（用户+AI交替）
+
+    // ----- 4. 获取系统设置 -----
+    const settings = await getSettings();
+
+    // ----- 5. 组装上下文 -----
+    const messagesForAI = [
+      { role: 'system', content: settings.system_prompt },
+      ...(historyMessages || []).map(m => ({ role: m.role, content: m.content }))
+    ];
+
+    // ----- 6. 调用豆包 API -----
     const response = await fetch('https://ark.cn-beijing.volces.com/api/v3/chat/completions', {
       method: 'POST',
       headers: {
@@ -42,10 +90,10 @@ app.post('/api/chat', async (req, res) => {
       },
       body: JSON.stringify({
         model: modelId,
-        messages: [{ role: 'user', content: message }],
+        messages: messagesForAI,
         stream: false,
-        max_tokens: 1024,
-        temperature: 0.7
+        max_tokens: settings.max_reply_tokens || 1024,
+        temperature: settings.temperature || 0.7
       })
     });
 
@@ -55,11 +103,65 @@ app.post('/api/chat', async (req, res) => {
     }
 
     const reply = data.choices?.[0]?.message?.content || '（未收到有效回复）';
-    res.json({ reply });
+
+    // ----- 7. 存入 AI 回复 -----
+    await supabase.from('messages').insert({
+      sessionid: currentSessionId,
+      role: 'assistant',
+      content: reply
+    });
+
+    // ----- 8. 更新会话时间 -----
+    await supabase.from('sessions').update({ updated_at: new Date() }).eq('id', currentSessionId);
+
+    // ----- 9. 返回结果 -----
+    res.json({ reply, sessionId: currentSessionId });
   } catch (error) {
-    console.error('豆包 API 调用失败:', error);
+    console.error('聊天接口出错:', error);
     res.status(500).json({ error: error.message || 'AI 服务暂时不可用' });
   }
+});
+
+// ========== 获取会话列表 ==========
+app.get('/api/sessions', async (req, res) => {
+  const { data, error } = await supabase
+    .from('sessions')
+    .select('*')
+    .order('updated_at', { ascending: false });
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ sessions: data });
+});
+
+// ========== 获取某个会话的消息 ==========
+app.get('/api/messages/:sessionId', async (req, res) => {
+  const { sessionId } = req.params;
+  const { data, error } = await supabase
+    .from('messages')
+    .select('*')
+    .eq('sessionid', sessionId)
+    .eq('visible', true)
+    .order('created_at', { ascending: true });
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ messages: data });
+});
+
+// ========== 重命名会话 ==========
+app.patch('/api/sessions/:id', async (req, res) => {
+  const { id } = req.params;
+  const { name } = req.body;
+  const { error } = await supabase.from('sessions').update({ name }).eq('id', id);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ success: true });
+});
+
+// ========== 删除会话（同时删除其下所有消息） ==========
+app.delete('/api/sessions/:id', async (req, res) => {
+  const { id } = req.params;
+  // 先删消息，再删会话
+  await supabase.from('messages').delete().eq('sessionid', id);
+  const { error } = await supabase.from('sessions').delete().eq('id', id);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ success: true });
 });
 
 app.listen(PORT, () => {
