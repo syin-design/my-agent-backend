@@ -71,16 +71,6 @@ app.get('/health', async (req, res) => {
   res.json({ status: 'ok', message: '服务正常，数据库已连接' });
 });
 
-// ========== 辅助函数：获取或创建设置 ==========
-async function getSettings() {
-  const { data } = await supabase.from('settings').select('*').limit(1).single();
-  return data || {
-    system_prompt: '你是一个贴心、知识渊博的AI助手，回答简洁生动，富有温度。',
-    temperature: 0.7,
-    max_context_rounds: 20,
-    max_reply_tokens: 1024
-  };
-}
 
 // ========== 核心聊天接口 ==========
 app.post('/api/chat', async (req, res) => {
