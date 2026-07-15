@@ -14,6 +14,54 @@ const supabase = createClient(
 app.use(cors());
 app.use(express.json());
 
+// ========== 辅助函数：获取或创建设置 ==========
+async function getSettings() {
+  const { data } = await supabase.from('settings').select('*').limit(1).single();
+  return data || {
+    system_prompt: '你是一个贴心、知识渊博的AI助手，回答简洁生动，富有温度。',
+    temperature: 0.7,
+    max_context_rounds: 20,
+    max_reply_tokens: 1024
+  };
+}
+
+// ========== 获取设置接口 ==========
+app.get('/api/settings', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('settings')
+      .select('*')
+      .limit(1)
+      .single();
+    if (error) throw error;
+    res.json({ settings: data });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ========== 更新设置接口 ==========
+app.put('/api/settings', async (req, res) => {
+  try {
+    const { system_prompt, temperature, max_context_rounds, max_reply_tokens } = req.body;
+    const updates = {};
+    if (system_prompt !== undefined) updates.system_prompt = system_prompt;
+    if (temperature !== undefined) updates.temperature = temperature;
+    if (max_context_rounds !== undefined) updates.max_context_rounds = max_context_rounds;
+    if (max_reply_tokens !== undefined) updates.max_reply_tokens = max_reply_tokens;
+    updates.updated_at = new Date();
+
+    const { error } = await supabase
+      .from('settings')
+      .update(updates)
+      .eq('id', 1);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ========== 健康检查 ==========
 app.get('/health', async (req, res) => {
   const { error } = await supabase.from('settings').select('*').limit(1);
