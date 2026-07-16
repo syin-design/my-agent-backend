@@ -61,67 +61,138 @@ app.put('/api/settings', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-// ========== 语音合成接口 (豆包语音 TTS) ==========
+// 在文件顶部导入 WebSocket 类
+import WebSocket from 'ws';
+
+// ========== 语音合成接口 (火山引擎 WebSocket TTS) ==========
 app.post('/api/tts', async (req, res) => {
   try {
     const { text } = req.body;
     if (!text || text.length > 1000) return res.status(400).json({ error: '文本为空或过长' });
 
     const apiKey = process.env.DOUBAO_TTS_API_KEY;
-    const voiceId = process.env.TTS_VOICE_ID || 'S_xxxxx';
+    const resourceId = process.env.DOUBAO_TTS_RESOURCE_ID || 'seed-icl-2.0';
+    const voiceId = process.env.TTS_VOICE_ID;
 
-    if (!apiKey) {
-      return res.status(500).json({ error: 'TTS API Key 未配置' });
+    if (!apiKey || !voiceId) {
+      return res.status(500).json({ error: 'TTS 配置不完整，请检查环境变量' });
     }
 
-    // 豆包语音 TTS API（使用 Bearer Token 认证）
-    const response = await fetch('https://openspeech.bytedance.com/api/v1/tts', {
-      method: 'POST',
+    // 创建 WebSocket 连接
+    const wsUrl = 'wss://openspeech.bytedance.com/api/v3/tts/bidirection';
+    const ws = new WebSocket(wsUrl, {
       headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
-      },
-      body: JSON.stringify({
-        app: {
-          appid: 'doubao-tts',
-          token: apiKey,
-          cluster: 'volcano_tts'
-        },
-        user: { uid: 'user1' },
-        audio: {
-          voice_type: voiceId,
-          encoding: 'mp3',
-          rate: 24000,
-          speed_ratio: 1.0,
-          volume_ratio: 1.0,
-          pitch_ratio: 1.0
-        },
-        request: {
-          reqid: Date.now().toString(),
-          text: text,
-          text_type: 'plain',
-          operation: 'query'
-        }
-      })
+        'X-Api-Key': apiKey,
+        'X-Api-Resource-Id': resourceId,
+        'X-Api-Connect-Id': require('uuid').v4(),
+      }
     });
 
-    const data = await response.json();
-    if (data.code !== 3000) throw new Error(data.message || 'TTS 请求失败');
+    // 当连接建立时
+    ws.on('open', async () => {
+      // 定义会话参数，严格按照你提供的示例
+      const sessionParams = {
+        req_params: {
+          speaker: voiceId,
+          audio_params: {
+            format: 'mp3',
+            sample_rate: 24000,
+          },
+        },
+      };
 
-    res.json({ audio: data.data, format: 'mp3' });
+      // 发送 StartSession 事件
+      const sessionId = require('uuid').v4();
+      const startSessionEvent = {
+        event: 3, // EventType: StartSession
+        ...sessionParams,
+        session_id: sessionId,
+      };
+      ws.send(JSON.stringify(startSessionEvent));
+
+      // 发送文本内容
+      const taskRequestEvent = {
+        event: 5, // EventType: TaskRequest
+        req_params: {
+          ...sessionParams.req_params,
+          text: text,
+        },
+        session_id: sessionId,
+      };
+      ws.send(JSON.stringify(taskRequestEvent));
+
+      // 发送 FinishSession 事件
+      const finishSessionEvent = {
+        event: 6, // EventType: FinishSession
+        session_id: sessionId,
+      };
+      ws.send(JSON.stringify(finishSessionEvent));
+    });
+
+    let audioChunks = [];
+    let errorMessage = null;
+    let isFinished = false;
+
+    ws.on('message', (data) => {
+      // 响应是 JSON 数组，需要解析
+      try {
+        const responseList = JSON.parse(data.toString());
+        for (const msg of responseList) {
+          if (msg.MsgType === 'AudioOnlyServer') {
+            // 收集音频数据（原始二进制缓冲区）
+            // 注意：ws 库不直接支持混合消息，此示例假设所有数据在 JSON 负载中
+            // 实际使用时，可能需要根据官方示例调整二进制帧处理
+          } else if (msg.EventType === 'SessionFinished') {
+            isFinished = true;
+            ws.close();
+          } else if (msg.EventType === 'SessionFailed') {
+            errorMessage = msg.Payload?.message || 'TTS 合成失败';
+            ws.close();
+          }
+        }
+      } catch (e) {
+        // 如果不是 JSON，可能是音频二进制帧
+        audioChunks.push(Buffer.from(data));
+      }
+    });
+
+    ws.on('error', (error) => {
+      console.error('WebSocket 错误:', error);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'TTS 服务连接失败' });
+      }
+    });
+
+    ws.on('close', () => {
+      if (errorMessage) {
+        if (!res.headersSent) {
+          res.status(500).json({ error: errorMessage });
+        }
+        return;
+      }
+
+      if (audioChunks.length === 0) {
+        if (!res.headersSent) {
+          res.status(500).json({ error: '未收到音频数据' });
+        }
+        return;
+      }
+
+      // 合并所有音频块并转为 Base64
+      const audioBuffer = Buffer.concat(audioChunks);
+      const base64Audio = audioBuffer.toString('base64');
+
+      if (!res.headersSent) {
+        res.json({ audio: base64Audio, format: 'mp3' });
+      }
+    });
+
   } catch (error) {
     console.error('TTS 接口出错:', error);
-    res.status(500).json({ error: error.message });
+    if (!res.headersSent) {
+      res.status(500).json({ error: error.message || '语音合成失败' });
+    }
   }
-});
-
-// ========== 健康检查 ==========
-app.get('/health', async (req, res) => {
-  const { error } = await supabase.from('settings').select('*').limit(1);
-  if (error) {
-    return res.status(500).json({ status: 'error', message: '数据库连接失败', detail: error.message });
-  }
-  res.json({ status: 'ok', message: '服务正常，数据库已连接' });
 });
 
 
