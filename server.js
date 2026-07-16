@@ -61,6 +61,52 @@ app.put('/api/settings', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+// ========== 语音合成接口 (火山引擎 TTS) ==========
+app.post('/api/tts', async (req, res) => {
+  try {
+    const { text } = req.body;
+    if (!text || text.length > 1000) return res.status(400).json({ error: '文本为空或过长' });
+
+    const accessKey = process.env.TTS_ACCESS_KEY;
+    const secretKey = process.env.TTS_SECRET_KEY;
+    const voiceId = process.env.TTS_VOICE_ID || 'S_xxxxx';
+
+    const response = await fetch('https://openspeech.bytedance.com/api/v1/tts', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${accessKey}:${secretKey}`
+      },
+      body: JSON.stringify({
+        app: {
+          appid: 'tts-agent',
+          token: accessKey,
+          cluster: 'volcano_tts'
+        },
+        user: { uid: 'user1' },
+        audio: {
+          voice_type: voiceId,
+          encoding: 'mp3',
+          rate: 24000
+        },
+        request: {
+          reqid: Date.now().toString(),
+          text: text,
+          text_type: 'plain',
+          operation: 'query'
+        }
+      })
+    });
+
+    const data = await response.json();
+    if (data.code !== 3000) throw new Error(data.message || 'TTS 失败');
+
+    res.json({ audio: data.data, format: 'mp3' });
+  } catch (error) {
+    console.error('TTS 接口出错:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // ========== 健康检查 ==========
 app.get('/health', async (req, res) => {
