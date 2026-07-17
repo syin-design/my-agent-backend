@@ -195,42 +195,21 @@ app.post('/api/tts', async (req, res) => {
 
             try {
         const audioBuffer = Buffer.concat(audioChunks);
+        const base64Audio = audioBuffer.toString('base64');
 
-        // 使用 lamejs 将 PCM 编码为 MP3
-        const lamejs = (await import('lamejs')).default;
-        const sampleRate = 24000;
-        const channels = 1; // 单声道
-        const mp3encoder = new lamejs.Mp3Encoder(channels, sampleRate, 128); // 128 kbps
-
-        // 将 Buffer 转为 16-bit 有符号整数数组（PCM）
-        const samples = new Int16Array(audioBuffer.buffer, audioBuffer.byteOffset, audioBuffer.length / 2);
-
-        // 分块编码（lamejs 每次最多处理约 1152 个样本）
-        const blockSize = 1152;
-        const mp3Chunks = [];
-        for (let i = 0; i < samples.length; i += blockSize) {
-          const chunk = samples.subarray(i, i + blockSize);
-          const mp3buf = mp3encoder.encodeBuffer(chunk);
-          if (mp3buf.length > 0) {
-            mp3Chunks.push(Buffer.from(mp3buf));
-          }
-        }
-        // 获取最后的帧
-        const endBuf = mp3encoder.flush();
-        if (endBuf.length > 0) {
-          mp3Chunks.push(Buffer.from(endBuf));
-        }
-
-        const mp3Buffer = Buffer.concat(mp3Chunks);
-        const base64Audio = mp3Buffer.toString('base64');
-
-               if (!res.headersSent) {
-          res.json({ audio: base64Audio, format: 'mp3' });
-        }
-      } catch (convertError) {
-        console.error('音频转换失败:', convertError);
+        // 直接返回原始 PCM 数据，附带采样率等信息
         if (!res.headersSent) {
-          res.status(500).json({ error: '音频转换失败' });
+          res.json({
+            audio: base64Audio,
+            format: 'pcm',
+            sampleRate: 24000,
+            channels: 1,
+            bitDepth: 16,
+          });
+        }
+      } catch (error) {
+        if (!res.headersSent) {
+          res.status(500).json({ error: '音频数据处理失败' });
         }
       }
     });   
