@@ -4,7 +4,6 @@ import { createClient } from '@supabase/supabase-js';
 import { v4 as uuidv4 } from 'uuid';
 import WebSocket from 'ws';
 
-import { SpeechSynthesisService } from '@volcengine/openapi/services/speech/v2019_06_14/speech_synthesis_service';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -106,105 +105,6 @@ app.post('/api/tts', async (req, res) => {
     res.status(500).json({ error: error.message || '语音合成失败' });
   }
 });
-
-    // 当连接建立时
-    ws.on('open', async () => {
-      // 定义会话参数，严格按照你提供的示例
-      const sessionParams = {
-        req_params: {
-          speaker: voiceId,
-          audio_params: {
-            format: 'mp3',
-            sample_rate: 24000,
-          },
-        },
-      };
-
-      // 发送 StartSession 事件
-      const sessionId = uuidv4();
-      const startSessionEvent = {
-        event: 3, // EventType: StartSession
-        ...sessionParams,
-        session_id: sessionId,
-      };
-      ws.send(JSON.stringify(startSessionEvent));
-
-      // 发送文本内容
-      const taskRequestEvent = {
-        event: 5, // EventType: TaskRequest
-        req_params: {
-          ...sessionParams.req_params,
-          text: text,
-        },
-        session_id: sessionId,
-      };
-      ws.send(JSON.stringify(taskRequestEvent));
-
-      // 发送 FinishSession 事件
-      const finishSessionEvent = {
-        event: 6, // EventType: FinishSession
-        session_id: sessionId,
-      };
-      ws.send(JSON.stringify(finishSessionEvent));
-    });
-
-    let audioChunks = [];
-    let errorMessage = null;
-    let isFinished = false;
-
-    ws.on('message', (data) => {
-      // 响应是 JSON 数组，需要解析
-      try {
-        const responseList = JSON.parse(data.toString());
-        for (const msg of responseList) {
-          if (msg.MsgType === 'AudioOnlyServer') {
-            // 收集音频数据（原始二进制缓冲区）
-            // 注意：ws 库不直接支持混合消息，此示例假设所有数据在 JSON 负载中
-            // 实际使用时，可能需要根据官方示例调整二进制帧处理
-          } else if (msg.EventType === 'SessionFinished') {
-            isFinished = true;
-            ws.close();
-          } else if (msg.EventType === 'SessionFailed') {
-            errorMessage = msg.Payload?.message || 'TTS 合成失败';
-            ws.close();
-          }
-        }
-      } catch (e) {
-        // 如果不是 JSON，可能是音频二进制帧
-        audioChunks.push(Buffer.from(data));
-      }
-    });
-
-    ws.on('error', (error) => {
-      console.error('WebSocket 错误:', error);
-      if (!res.headersSent) {
-        res.status(500).json({ error: 'TTS 服务连接失败' });
-      }
-    });
-
-    ws.on('close', () => {
-      if (errorMessage) {
-        if (!res.headersSent) {
-          res.status(500).json({ error: errorMessage });
-        }
-        return;
-      }
-
-      if (audioChunks.length === 0) {
-        if (!res.headersSent) {
-          res.status(500).json({ error: '未收到音频数据' });
-        }
-        return;
-      }
-
-      // 合并所有音频块并转为 Base64
-      const audioBuffer = Buffer.concat(audioChunks);
-      const base64Audio = audioBuffer.toString('base64');
-
-      if (!res.headersSent) {
-        res.json({ audio: base64Audio, format: 'mp3' });
-      }
-    });
 
 
 // ========== 核心聊天接口 ==========
