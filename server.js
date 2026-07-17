@@ -17,6 +17,15 @@ const supabase = createClient(
 app.use(cors());
 app.use(express.json());
 
+// ========== 健康检查 ==========
+app.get('/health', async (req, res) => {
+  const { error } = await supabase.from('settings').select('*').limit(1);
+  if (error) {
+    return res.status(500).json({ status: 'error', message: '数据库连接失败', detail: error.message });
+  }
+  res.json({ status: 'ok', message: '服务正常，数据库已连接' });
+});
+
 // ========== 辅助函数：获取或创建设置 ==========
 async function getSettings() {
   const { data } = await supabase.from('settings').select('*').limit(1).single();
