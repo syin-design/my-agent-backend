@@ -4,6 +4,8 @@ import { createClient } from '@supabase/supabase-js';
 import { v4 as uuidv4 } from 'uuid';
 import WebSocket from 'ws';
 
+import { SpeechSynthesisService } from '@volcengine/openapi/services/speech/v2019_06_14/speech_synthesis_service';
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -66,28 +68,44 @@ app.put('/api/settings', async (req, res) => {
 // 在文件顶部导入 WebSocket 类
 
 // ========== 语音合成接口 (火山引擎 WebSocket TTS) ==========
+// ========== 语音合成接口 (使用官方 SDK) ==========
 app.post('/api/tts', async (req, res) => {
   try {
     const { text } = req.body;
     if (!text || text.length > 1000) return res.status(400).json({ error: '文本为空或过长' });
 
     const apiKey = process.env.DOUBAO_TTS_API_KEY;
-    const resourceId = process.env.DOUBAO_TTS_RESOURCE_ID || 'seed-icl-2.0';
     const voiceId = process.env.TTS_VOICE_ID;
 
     if (!apiKey || !voiceId) {
-      return res.status(500).json({ error: 'TTS 配置不完整，请检查环境变量' });
+      return res.status(500).json({ error: 'TTS 配置不完整' });
     }
 
-    // 创建 WebSocket 连接
-    const wsUrl = 'wss://openspeech.bytedance.com/api/v3/tts/bidirection';
-    const ws = new WebSocket(wsUrl, {
-      headers: {
-        'X-Api-Key': apiKey,
-        'X-Api-Resource-Id': resourceId,
-        'X-Api-Connect-Id': uuidv4(),
-      }
+    // 初始化 SDK 服务
+    const service = new SpeechSynthesisService({
+      accessKeyId: apiKey,
+      secretAccessKey: '',
+      region: 'cn-north-1',
     });
+
+    // 构建请求参数
+    const params = {
+      text: text,
+      speaker: voiceId,
+      format: 'mp3',
+      sample_rate: 24000,
+    };
+
+    // 调用服务
+    const result = await service.synthesize(params);
+
+    // 返回 Base64 编码的音频
+    res.json({ audio: result.audio.toString('base64'), format: 'mp3' });
+  } catch (error) {
+    console.error('TTS SDK 接口出错:', error);
+    res.status(500).json({ error: error.message || '语音合成失败' });
+  }
+});
 
     // 当连接建立时
     ws.on('open', async () => {
