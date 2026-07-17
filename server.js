@@ -123,6 +123,7 @@ app.post('/api/tts', async (req, res) => {
 
 // ========== 语音合成接口 (火山引擎 WebSocket TTS) ==========
 // ========== 语音合成接口 (使用官方 SDK) ==========
+// ========== 语音合成接口 (HTTP REST API) ==========
 app.post('/api/tts', async (req, res) => {
   try {
     const { text } = req.body;
@@ -130,33 +131,45 @@ app.post('/api/tts', async (req, res) => {
 
     const apiKey = process.env.DOUBAO_TTS_API_KEY;
     const voiceId = process.env.TTS_VOICE_ID;
+    const appId = process.env.DOUBAO_TTS_APPID;
 
-    if (!apiKey || !voiceId) {
-      return res.status(500).json({ error: 'TTS 配置不完整' });
+    if (!apiKey || !voiceId || !appId) {
+      return res.status(500).json({ error: 'TTS 配置不完整，请检查环境变量' });
     }
 
-    // 初始化 SDK 服务
-    const service = new SpeechSynthesisService({
-      accessKeyId: apiKey,
-      secretAccessKey: '',
-      region: 'cn-north-1',
+    // 完整的请求体，包含 app.appid
+    const response = await fetch('https://openspeech.bytedance.com/api/v1/tts', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Api-Key': apiKey,
+        'X-Api-Resource-Id': 'seed-icl-2.0', // 声音复刻模型
+      },
+      body: JSON.stringify({
+        app: {
+          appid: appId,
+        },
+        speaker: voiceId,
+        text: text,
+        format: 'mp3',
+        sample_rate: 24000,
+      })
     });
 
-    // 构建请求参数
-    const params = {
-      text: text,
-      speaker: voiceId,
-      format: 'mp3',
-      sample_rate: 24000,
-    };
+    if (!response.ok) {
+      const errData = await response.json().catch(() => ({}));
+      throw new Error(errData.message || `TTS 请求失败 (${response.status})`);
+    }
 
-    // 调用服务
-    const result = await service.synthesize(params);
+    const data = await response.json();
+    if (data.code !== 3000) {
+      throw new Error(data.message || 'TTS 合成失败');
+    }
 
-    // 返回 Base64 编码的音频
-    res.json({ audio: result.audio.toString('base64'), format: 'mp3' });
+    // 返回 Base64 编码的音频数据
+    res.json({ audio: data.data, format: 'mp3' });
   } catch (error) {
-    console.error('TTS SDK 接口出错:', error);
+    console.error('TTS HTTP 接口出错:', error);
     res.status(500).json({ error: error.message || '语音合成失败' });
   }
 });
