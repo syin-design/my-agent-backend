@@ -118,7 +118,7 @@ app.post('/api/tts', async (req, res) => {
         audioChunks.push(Buffer.from(data));
         return;
       }
-      
+
       try {
         const responseList = JSON.parse(data.toString());
         for (const msg of responseList) {
@@ -195,9 +195,11 @@ app.post('/api/tts', async (req, res) => {
 
       const audioBuffer = Buffer.concat(audioChunks);
       const base64Audio = audioBuffer.toString('base64');
+      // 调试：输出前 10 个字节的十六进制，用于判断文件格式
+      const debugHex = audioBuffer.slice(0, 10).toString('hex');
 
       if (!res.headersSent) {
-        res.json({ audio: base64Audio, format: 'mp3' });
+        res.json({ audio: base64Audio, format: 'mp3' , debugHex: debugHex });
       }
     });
 
