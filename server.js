@@ -1,8 +1,6 @@
 import express from 'express';
 import cors from 'cors';
 import { createClient } from '@supabase/supabase-js';
-import { v4 as uuidv4 } from 'uuid';
-import WebSocket from 'ws';
 
 
 const app = express();
@@ -100,8 +98,11 @@ app.post('/api/tts', async (req, res) => {
       body: JSON.stringify({
         app: {
           appid: appId,
-           cluster: 'volcano_tts' 
+          cluster: 'volcano_tts' 
         },
+         user: {
+    uid: 'my-agent-user' 
+  },
         speaker: voiceId,
         text: text,
         format: 'mp3',
