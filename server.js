@@ -64,7 +64,6 @@ app.put('/api/settings', async (req, res) => {
   }
 });
 // 在文件顶部导入 WebSocket 类
-import WebSocket from 'ws';
 
 // ========== 语音合成接口 (火山引擎 WebSocket TTS) ==========
 app.post('/api/tts', async (req, res) => {
