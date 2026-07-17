@@ -2,6 +2,21 @@ import express from 'express';
 import cors from 'cors';
 import { createClient } from '@supabase/supabase-js';
 
+// ========== 自动安装 ffmpeg（用于音频转换） ==========
+import { execSync } from 'child_process';
+try {
+  execSync('which ffmpeg', { stdio: 'ignore' });
+  console.log('ffmpeg 已存在，跳过安装');
+} catch {
+  console.log('正在安装 ffmpeg...');
+  try {
+    execSync('sudo apt-get update && sudo apt-get install -y ffmpeg', { stdio: 'inherit', timeout: 120000 });
+    console.log('ffmpeg 安装成功');
+  } catch (installError) {
+    console.error('ffmpeg 安装失败，将使用备用方案:', installError.message);
+  }
+}
+
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -196,11 +211,9 @@ app.post('/api/tts', async (req, res) => {
       try {
         const audioBuffer = Buffer.concat(audioChunks);
 
-        // 动态导入 ffmpeg（ES Module 兼容）
+        // 动态导入 ffmpeg（使用系统安装的版本）
         const ffmpeg = (await import('fluent-ffmpeg')).default;
-        const ffmpegInstaller = await import('@ffmpeg-installer/ffmpeg');
-        ffmpeg.setFfmpegPath(ffmpegInstaller.path);
-
+        
         // 创建转换命令：PCM → MP3
         const command = ffmpeg()
           .input(audioBuffer)
