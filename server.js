@@ -109,6 +109,16 @@ app.post('/api/tts', async (req, res) => {
     });
 
     ws.on('message', (data) => {
+            // 优先处理音频二进制帧
+      if (Buffer.isBuffer(data)) {
+        audioChunks.push(data);
+        return;
+      }
+      if (data instanceof ArrayBuffer) {
+        audioChunks.push(Buffer.from(data));
+        return;
+      }
+      
       try {
         const responseList = JSON.parse(data.toString());
         for (const msg of responseList) {
@@ -135,7 +145,8 @@ app.post('/api/tts', async (req, res) => {
                 text: text,
               },
             }));
-            // ④ 结束会话
+          } else if (msg.EventType === 'TTSSentenceEnd') {
+            // ④ 文本合成完毕，安全结束会话
             ws.send(JSON.stringify({
               EventType: 'FinishSession',
               session_id: sessionId,
