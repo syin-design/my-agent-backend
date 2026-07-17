@@ -100,6 +100,7 @@ app.post('/api/tts', async (req, res) => {
       body: JSON.stringify({
         app: {
           appid: appId,
+           cluster: 'volcano_tts' 
         },
         speaker: voiceId,
         text: text,
