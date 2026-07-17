@@ -206,14 +206,6 @@ app.post('/api/tts', async (req, res) => {
       }
     });
 
-  } catch (error) {
-    console.error('TTS 接口出错:', error);
-    if (!res.headersSent) {
-      res.status(500).json({ error: error.message || '语音合成失败' });
-    }
-  }
-});
-
 
 // ========== 核心聊天接口 ==========
 app.post('/api/chat', async (req, res) => {
