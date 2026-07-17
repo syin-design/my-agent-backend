@@ -1,6 +1,8 @@
 import express from 'express';
 import cors from 'cors';
 import { createClient } from '@supabase/supabase-js';
+import { v4 as uuidv4 } from 'uuid';
+import WebSocket from 'ws';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -84,7 +86,7 @@ app.post('/api/tts', async (req, res) => {
       headers: {
         'X-Api-Key': apiKey,
         'X-Api-Resource-Id': resourceId,
-        'X-Api-Connect-Id': require('uuid').v4(),
+        'X-Api-Connect-Id': uuidv4(),
       }
     });
 
@@ -102,7 +104,7 @@ app.post('/api/tts', async (req, res) => {
       };
 
       // 发送 StartSession 事件
-      const sessionId = require('uuid').v4();
+      const sessionId = uuidv4();
       const startSessionEvent = {
         event: 3, // EventType: StartSession
         ...sessionParams,
