@@ -2,21 +2,6 @@ import express from 'express';
 import cors from 'cors';
 import { createClient } from '@supabase/supabase-js';
 
-// ========== 自动安装 ffmpeg（用于音频转换） ==========
-import { execSync } from 'child_process';
-try {
-  execSync('which ffmpeg', { stdio: 'ignore' });
-  console.log('ffmpeg 已存在，跳过安装');
-} catch {
-  console.log('正在安装 ffmpeg...');
-  try {
-    execSync('sudo apt-get update && sudo apt-get install -y ffmpeg', { stdio: 'inherit', timeout: 120000 });
-    console.log('ffmpeg 安装成功');
-  } catch (installError) {
-    console.error('ffmpeg 安装失败，将使用备用方案:', installError.message);
-  }
-}
-
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -208,45 +193,47 @@ app.post('/api/tts', async (req, res) => {
         return;
       }
 
-      try {
+            try {
         const audioBuffer = Buffer.concat(audioChunks);
 
-        // 动态导入 ffmpeg（使用系统安装的版本）
-        const ffmpeg = (await import('fluent-ffmpeg')).default;
-        
-        // 创建转换命令：PCM → MP3
-        const command = ffmpeg()
-          .input(audioBuffer)
-          .inputFormat('s16le')
-          .audioFrequency(24000)
-          .audioChannels(1)
-          .audioCodec('libmp3lame')
-          .format('mp3');
+        // 使用 lamejs 将 PCM 编码为 MP3
+        const lamejs = (await import('lamejs')).default;
+        const sampleRate = 24000;
+        const channels = 1; // 单声道
+        const mp3encoder = new lamejs.Mp3Encoder(channels, sampleRate, 128); // 128 kbps
 
-        const chunks = [];
-        command.on('data', chunk => chunks.push(chunk));
-        command.on('end', () => {
-          const mp3Buffer = Buffer.concat(chunks);
-          const base64Audio = mp3Buffer.toString('base64');
-          if (!res.headersSent) {
-            res.json({ audio: base64Audio, format: 'mp3' });
-          }
-        });
-        command.on('error', (err) => {
-          console.error('音频转换失败:', err);
-          if (!res.headersSent) {
-            res.status(500).json({ error: '音频转换失败' });
-          }
-        });
+        // 将 Buffer 转为 16-bit 有符号整数数组（PCM）
+        const samples = new Int16Array(audioBuffer.buffer, audioBuffer.byteOffset, audioBuffer.length / 2);
 
-        command.run();
+        // 分块编码（lamejs 每次最多处理约 1152 个样本）
+        const blockSize = 1152;
+        const mp3Chunks = [];
+        for (let i = 0; i < samples.length; i += blockSize) {
+          const chunk = samples.subarray(i, i + blockSize);
+          const mp3buf = mp3encoder.encodeBuffer(chunk);
+          if (mp3buf.length > 0) {
+            mp3Chunks.push(Buffer.from(mp3buf));
+          }
+        }
+        // 获取最后的帧
+        const endBuf = mp3encoder.flush();
+        if (endBuf.length > 0) {
+          mp3Chunks.push(Buffer.from(endBuf));
+        }
+
+        const mp3Buffer = Buffer.concat(mp3Chunks);
+        const base64Audio = mp3Buffer.toString('base64');
+
+               if (!res.headersSent) {
+          res.json({ audio: base64Audio, format: 'mp3' });
+        }
       } catch (convertError) {
-        console.error('转换模块加载失败:', convertError);
+        console.error('音频转换失败:', convertError);
         if (!res.headersSent) {
-          res.status(500).json({ error: '音频转换模块不可用' });
+          res.status(500).json({ error: '音频转换失败' });
         }
       }
-    });
+    });   
 
   } catch (error) {
     console.error('TTS 接口出错:', error);
@@ -254,7 +241,7 @@ app.post('/api/tts', async (req, res) => {
       res.status(500).json({ error: error.message || '语音合成失败' });
     }
   }
-});
+});   
 
 // ========== 核心聊天接口 ==========
 app.post('/api/chat', async (req, res) => {
