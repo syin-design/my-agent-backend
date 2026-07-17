@@ -94,7 +94,7 @@ app.post('/api/tts', async (req, res) => {
     const ws = new WebSocket(url, {
       headers: {
         'X-Api-Key': apiKey,
-        'X-Api-Resource-Id': 'seed-icl-2.0',     // 声音复刻大模型 2.0
+        'X-Api-Resource-Id': 'seed-icl-2.0',
         'X-Api-Connect-Id': connectId,
       }
     });
@@ -109,7 +109,7 @@ app.post('/api/tts', async (req, res) => {
     });
 
     ws.on('message', (data) => {
-            // 优先处理音频二进制帧
+      // 优先处理音频二进制帧
       if (Buffer.isBuffer(data)) {
         audioChunks.push(data);
         return;
@@ -137,7 +137,7 @@ app.post('/api/tts', async (req, res) => {
               },
             }));
           } else if (msg.EventType === 'SessionStarted') {
-            // ③ 发送文本（只传 text）
+            // ③ 发送文本
             ws.send(JSON.stringify({
               EventType: 'TaskRequest',
               session_id: sessionId,
@@ -146,7 +146,7 @@ app.post('/api/tts', async (req, res) => {
               },
             }));
           } else if (msg.EventType === 'TTSSentenceEnd') {
-            // ④ 文本合成完毕，安全结束会话
+            // ④ 文本合成完毕，结束会话
             ws.send(JSON.stringify({
               EventType: 'FinishSession',
               session_id: sessionId,
@@ -162,7 +162,7 @@ app.post('/api/tts', async (req, res) => {
           }
         }
       } catch (e) {
-        // ⑥ 音频二进制帧
+        // JSON 解析失败，可能是其他二进制数据
         if (Buffer.isBuffer(data)) {
           audioChunks.push(data);
         } else if (data instanceof ArrayBuffer) {
@@ -178,7 +178,7 @@ app.post('/api/tts', async (req, res) => {
       }
     });
 
-    ws.on('close', () => {
+    ws.on('close', async () => {
       if (errorMessage) {
         if (!res.headersSent) {
           res.status(500).json({ error: errorMessage });
@@ -193,13 +193,45 @@ app.post('/api/tts', async (req, res) => {
         return;
       }
 
-      const audioBuffer = Buffer.concat(audioChunks);
-      const base64Audio = audioBuffer.toString('base64');
-      // 调试：输出前 10 个字节的十六进制，用于判断文件格式
-      const debugHex = audioBuffer.slice(0, 10).toString('hex');
+      try {
+        const audioBuffer = Buffer.concat(audioChunks);
 
-      if (!res.headersSent) {
-        res.json({ audio: base64Audio, format: 'mp3' , debugHex: debugHex });
+        // 动态导入 ffmpeg（ES Module 兼容）
+        const ffmpeg = (await import('fluent-ffmpeg')).default;
+        const ffmpegInstaller = await import('@ffmpeg-installer/ffmpeg');
+        ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+
+        // 创建转换命令：PCM → MP3
+        const command = ffmpeg()
+          .input(audioBuffer)
+          .inputFormat('s16le')
+          .audioFrequency(24000)
+          .audioChannels(1)
+          .audioCodec('libmp3lame')
+          .format('mp3');
+
+        const chunks = [];
+        command.on('data', chunk => chunks.push(chunk));
+        command.on('end', () => {
+          const mp3Buffer = Buffer.concat(chunks);
+          const base64Audio = mp3Buffer.toString('base64');
+          if (!res.headersSent) {
+            res.json({ audio: base64Audio, format: 'mp3' });
+          }
+        });
+        command.on('error', (err) => {
+          console.error('音频转换失败:', err);
+          if (!res.headersSent) {
+            res.status(500).json({ error: '音频转换失败' });
+          }
+        });
+
+        command.run();
+      } catch (convertError) {
+        console.error('转换模块加载失败:', convertError);
+        if (!res.headersSent) {
+          res.status(500).json({ error: '音频转换模块不可用' });
+        }
       }
     });
 
@@ -210,7 +242,6 @@ app.post('/api/tts', async (req, res) => {
     }
   }
 });
-
 
 // ========== 核心聊天接口 ==========
 app.post('/api/chat', async (req, res) => {
