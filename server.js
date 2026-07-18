@@ -72,7 +72,7 @@ app.put('/api/settings', async (req, res) => {
 });
 
 
-// ========== 语音合成接口 (手动WebSocket实现，兼容火山引擎协议) ==========
+// ========== 语音合成接口 (火山引擎官方二进制帧协议) ==========
 app.post('/api/tts', async (req, res) => {
   try {
     const { text } = req.body;
@@ -85,10 +85,193 @@ app.post('/api/tts', async (req, res) => {
       return res.status(500).json({ error: 'TTS 配置不完整，请检查环境变量' });
     }
 
-    console.log('🔊 TTS 接口被调用，使用的是手动 WebSocket 实现 v2');
     const https = await import('https');
     const crypto = await import('crypto');
     const connectId = crypto.randomUUID();
+
+    // ========== 火山引擎协议常量 ==========
+    const Version = { Version1: 1 };
+    const HeaderSize = { HeaderSize4: 1 };
+    const MsgType = { FullClientRequest: 0b0001, AudioOnlyServer: 0b1011, FullServerResponse: 0b1001 };
+    const MsgFlag = { NoSeq: 0, WithEvent: 0b0100 };
+    const Serialization = { JSON: 0b0001 };
+    const Compression = { None: 0 };
+    const EventType = {
+      StartConnection: 1,  FinishConnection: 2,  ConnectionStarted: 50,
+      ConnectionFailed: 51, ConnectionFinished: 52, StartSession: 100,
+      FinishSession: 102, SessionStarted: 150, SessionFinished: 152,
+      SessionFailed: 153, TaskRequest: 200, TTSSentenceEnd: 351
+    };
+
+    /**
+     * 构建火山引擎自定义二进制帧 (marshal)
+     * 帧格式:
+     *   Byte 0: 高4位=Version, 低4位=HeaderSize
+     *   Byte 1: 高4位=MsgType, 低4位=MsgFlag
+     *   Byte 2: 高4位=Serialization, 低4位=Compression
+     *   Byte 3+: 可选扩展头（取决于HeaderSize）
+     *   Event (4字节大端) — 仅当MsgFlag包含WithEvent时
+     *   SessionID长度 + SessionID (uint32大端 + UTF-8) — 仅当Event需要时
+     *   Payload长度 + Payload (uint32大端 + raw bytes)
+     */
+    function marshal(eventType, sessionId, payload) {
+      const payloadBuf = Buffer.from(payload, 'utf8');
+      const hasEvent = eventType !== undefined;
+      const sidBuf = sessionId ? Buffer.from(sessionId, 'utf8') : null;
+
+      // 是否需要写入session_id（根据官方协议，StartConnection/FinishConnection等不写session_id）
+      const needsSid = hasEvent &&
+        eventType !== EventType.StartConnection &&
+        eventType !== EventType.FinishConnection &&
+        eventType !== EventType.ConnectionStarted &&
+        eventType !== EventType.ConnectionFailed &&
+        eventType !== EventType.ConnectionFinished;
+
+      // 计算总长度
+      let totalSize = 4 * HeaderSize.HeaderSize4; // 基础头部
+      if (hasEvent) totalSize += 4; // Event (int32)
+      if (needsSid && sidBuf) totalSize += 4 + sidBuf.length; // SessionID长度 + SessionID
+      totalSize += 4 + payloadBuf.length; // Payload长度 + Payload
+
+      const buf = Buffer.alloc(totalSize);
+      let offset = 0;
+
+      // Byte 0: Version + HeaderSize
+      buf[offset++] = (Version.Version1 << 4) | HeaderSize.HeaderSize4;
+      // Byte 1: MsgType + MsgFlag
+      const flag = hasEvent ? MsgFlag.WithEvent : MsgFlag.NoSeq;
+      buf[offset++] = (MsgType.FullClientRequest << 4) | flag;
+      // Byte 2: Serialization + Compression
+      buf[offset++] = (Serialization.JSON << 4) | Compression.None;
+      // Byte 3: Reserved (header padding)
+      buf[offset++] = 0;
+
+      // Event (4字节大端)
+      if (hasEvent) {
+        buf.writeInt32BE(eventType, offset);
+        offset += 4;
+      }
+
+      // SessionID (长度前缀 + UTF-8) — 仅当需要时
+      if (needsSid && sidBuf) {
+        buf.writeUInt32BE(sidBuf.length, offset);
+        offset += 4;
+        sidBuf.copy(buf, offset);
+        offset += sidBuf.length;
+      }
+
+      // Payload (长度前缀 + 数据)
+      buf.writeUInt32BE(payloadBuf.length, offset);
+      offset += 4;
+      payloadBuf.copy(buf, offset);
+
+      return buf;
+    }
+
+    /**
+     * 解析火山引擎返回的自定义二进制帧 (unmarshal)
+     * 返回 { eventType, sessionId, connectId, payload }
+     */
+    function unmarshal(data) {
+      if (data.length < 4) return null;
+      let offset = 0;
+
+      const versionHeaderSize = data[offset++];
+      // const version = (versionHeaderSize >> 4) & 0x0f;
+      const headerSize = versionHeaderSize & 0x0f;
+      const msgTypeFlag = data[offset++];
+      const msgType = (msgTypeFlag >> 4) & 0x0f;
+      const msgFlag = msgTypeFlag & 0x0f;
+      const serialCompress = data[offset++];
+      // const serial = (serialCompress >> 4) & 0x0f;
+      // const compress = serialCompress & 0x0f;
+
+      // 跳过头部填充
+      const headerBytes = 4 * headerSize;
+      if (data.length < headerBytes) return null;
+      offset = headerBytes; // 直接跳到header之后
+
+      let eventType = null, sessionId = null, connectId = null;
+
+      // 如果是音频帧，直接返回payload
+      if (msgType === MsgType.AudioOnlyServer) {
+        if (data.length < offset + 4) return null;
+        const payloadLen = data.readUInt32BE(offset);
+        offset += 4;
+        if (data.length < offset + payloadLen) return null;
+        return { payload: data.slice(offset, offset + payloadLen) };
+      }
+
+      // 文本帧解析Event
+      if (msgFlag & MsgFlag.WithEvent) {
+        if (data.length < offset + 4) return null;
+        eventType = data.readInt32BE(offset);
+        offset += 4;
+
+        // 跳过SessionID（如果存在）
+        const needsSid = eventType !== undefined &&
+          eventType !== EventType.StartConnection &&
+          eventType !== EventType.FinishConnection &&
+          eventType !== EventType.ConnectionStarted &&
+          eventType !== EventType.ConnectionFailed &&
+          eventType !== EventType.ConnectionFinished;
+
+        if (needsSid) {
+          if (data.length < offset + 4) return null;
+          const sidLen = data.readUInt32BE(offset);
+          offset += 4;
+          if (sidLen > 0 && data.length >= offset + sidLen) {
+            sessionId = data.slice(offset, offset + sidLen).toString('utf8');
+            offset += sidLen;
+          }
+        }
+      }
+
+      // Payload
+      if (data.length < offset + 4) return null;
+      const payloadLen = data.readUInt32BE(offset);
+      offset += 4;
+      if (data.length < offset + payloadLen) return null;
+      const payload = data.slice(offset, offset + payloadLen);
+
+      return { eventType, sessionId, connectId, payload };
+    }
+
+    /**
+     * 构建标准WebSocket帧并发送
+     */
+    function sendBinaryFrame(payload) {
+      const data = payload; // 直接使用Buffer，不再转UTF-8
+      const length = data.length;
+      const mask = crypto.randomBytes(4);
+
+      // 使用二进制帧 (opcode 0x02)，因为火山引擎使用自定义二进制协议
+      let header;
+      if (length < 126) {
+        header = Buffer.alloc(2);
+        header[0] = 0x82; // FIN + binary opcode
+        header[1] = 0x80 | length;
+      } else if (length < 65536) {
+        header = Buffer.alloc(4);
+        header[0] = 0x82;
+        header[1] = 0x80 | 126;
+        header.writeUInt16BE(length, 2);
+      } else {
+        header = Buffer.alloc(10);
+        header[0] = 0x82;
+        header[1] = 0x80 | 127;
+        header.writeBigUInt64BE(BigInt(length), 2);
+      }
+
+      const maskedData = Buffer.alloc(length);
+      for (let i = 0; i < length; i++) {
+        maskedData[i] = data[i] ^ mask[i % 4];
+      }
+
+      socket.write(Buffer.concat([header, mask, maskedData]));
+    }
+
+    // ========== 发起WebSocket连接 ==========
     const host = 'openspeech.bytedance.com';
     const path = '/api/v3/tts/bidirection';
 
@@ -118,47 +301,18 @@ app.post('/api/tts', async (req, res) => {
       let sessionId = null;
       let errorMessage = null;
 
-            function sendFrame(payload) {
-        const data = Buffer.from(payload, 'utf8');
-        const length = data.length;
-        // 生成4字节随机掩码
-        const mask = crypto.randomBytes(4);
-        
-        let header;
-        if (length < 126) {
-          header = Buffer.alloc(2);
-          header[0] = 0x81; // FIN + text opcode
-          header[1] = 0x80 | length; // 设置掩码位 + 长度
-        } else if (length < 65536) {
-          header = Buffer.alloc(4);
-          header[0] = 0x81;
-          header[1] = 0x80 | 126; // 掩码位 + 扩展长度标识
-          header.writeUInt16BE(length, 2);
-        } else {
-          header = Buffer.alloc(10);
-          header[0] = 0x81;
-          header[1] = 0x80 | 127; // 掩码位 + 64位扩展长度
-          header.writeBigUInt64BE(BigInt(length), 2);
-        }
-        
-        // 拼接：头部 + 掩码 + 掩码后的数据
-        const maskedData = Buffer.alloc(length);
-        for (let i = 0; i < length; i++) {
-          maskedData[i] = data[i] ^ mask[i % 4];
-        }
-        
-        socket.write(Buffer.concat([header, mask, maskedData]));
-      }
-
-      sendFrame(JSON.stringify({ EventType: 'StartConnection' }));
+      // ① 建立连接 (StartConnection)
+      sendBinaryFrame(marshal(EventType.StartConnection, null, '{}'));
 
       let buffer = Buffer.alloc(0);
 
       socket.on('data', (data) => {
         buffer = Buffer.concat([buffer, data]);
-        
+
+        // 解析标准WebSocket帧
         while (buffer.length >= 2) {
           const opcode = buffer[0] & 0x0f;
+          const masked = (buffer[1] & 0x80) !== 0;
           let payloadLength = buffer[1] & 0x7f;
           let offset = 2;
 
@@ -172,56 +326,83 @@ app.post('/api/tts', async (req, res) => {
             offset = 10;
           }
 
+          // 跳过掩码（服务器→客户端帧不需要掩码，但以防万一）
+          if (masked) {
+            if (buffer.length < offset + 4 + payloadLength) break;
+            offset += 4; // 跳过4字节掩码
+          }
+
           if (buffer.length < offset + payloadLength) break;
 
-          const payload = buffer.slice(offset, offset + payloadLength);
+          let payload = buffer.slice(offset, offset + payloadLength);
           buffer = buffer.slice(offset + payloadLength);
 
+          // 如果服务器帧有掩码，需要解码
+          if (masked) {
+            const maskBytes = buffer.slice(offset - 4, offset);
+            const decoded = Buffer.alloc(payloadLength);
+            for (let i = 0; i < payloadLength; i++) {
+              decoded[i] = payload[i] ^ maskBytes[i % 4];
+            }
+            payload = decoded;
+          }
+
           if (opcode === 0x02) {
-            audioChunks.push(payload);
-          } else if (opcode === 0x01) {
-            try {
-              const responseList = JSON.parse(payload.toString('utf8'));
-              for (const msg of responseList) {
-                if (msg.EventType === 'ConnectionStarted') {
-                  sessionId = Date.now().toString(36) + Math.random().toString(36).substr(2, 6);
-                  sendFrame(JSON.stringify({
-                    EventType: 'StartSession',
-                    session_id: sessionId,
+            // 二进制帧 — 解析火山引擎自定义协议
+            const msg = unmarshal(payload);
+            if (msg && msg.payload) {
+              // 是包含 payload 的消息
+              if (msg.eventType !== undefined && msg.eventType !== null) {
+                // 有事件的消息（控制帧）
+                const responseText = msg.payload.toString('utf8');
+                let responseJson;
+                try {
+                  responseJson = JSON.parse(responseText);
+                } catch (e) {
+                  responseJson = {};
+                }
+
+                                if (msg.eventType === EventType.ConnectionStarted) {
+                  // ② 创建会话
+                  const sessionPayload = JSON.stringify({
+                    event: EventType.StartSession,
                     req_params: {
                       speaker: voiceId,
-                      audio_params: {
-                        format: 'mp3',
-                        sample_rate: 24000,
-                      },
-                    },
-                  }));
-                } else if (msg.EventType === 'SessionStarted') {
-                  sendFrame(JSON.stringify({
-                    EventType: 'TaskRequest',
-                    session_id: sessionId,
-                    req_params: { text: text },
-                  }));
-                } else if (msg.EventType === 'TTSSentenceEnd') {
-                  sendFrame(JSON.stringify({
-                    EventType: 'FinishSession',
-                    session_id: sessionId,
-                  }));
-                } else if (msg.EventType === 'SessionFinished') {
-                  sendFrame(JSON.stringify({ EventType: 'FinishConnection' }));
-                } else if (msg.EventType === 'ConnectionFinished') {
+                      audio_params: { format: 'mp3', sample_rate: 24000 }
+                    }
+                  });
+                  sessionId = Date.now().toString(36) + Math.random().toString(36).substr(2, 6);
+                  sendBinaryFrame(marshal(EventType.StartSession, sessionId, sessionPayload));
+                } else if (msg.eventType === EventType.SessionStarted) {
+                  // ③ 发送文本
+                  const taskPayload = JSON.stringify({
+                    event: EventType.TaskRequest,
+                    req_params: { text: text }
+                  });
+                  sendBinaryFrame(marshal(EventType.TaskRequest, sessionId, taskPayload));
+                } else if (msg.eventType === EventType.TTSSentenceEnd) {
+                  // ④ 文本合成完毕，结束会话
+                  sendBinaryFrame(marshal(EventType.FinishSession, sessionId, '{}'));
+                } else if (msg.eventType === EventType.SessionFinished) {
+                  // ⑤ 结束连接
+                  sendBinaryFrame(marshal(EventType.FinishConnection, null, '{}'));
+                } else if (msg.eventType === EventType.ConnectionFinished) {
                   socket.end();
-                } else if (msg.EventType === 'ConnectionFailed') {
-                  errorMessage = msg.Payload?.message || '连接失败';
+                } else if (msg.eventType === EventType.ConnectionFailed) {
+                  errorMessage = responseJson.error || responseJson.message || '连接失败';
                   socket.end();
-                } else if (msg.EventType === 'SessionFailed') {
-                  errorMessage = msg.Payload?.message || 'TTS 合成失败';
+                } else if (msg.eventType === EventType.SessionFailed) {
+                  errorMessage = responseJson.error || responseJson.message || 'TTS 合成失败';
                   socket.end();
                 }
+              } else {
+                // 没有事件的消息 — 这是音频数据
+                audioChunks.push(msg.payload);
               }
-            } catch (e) {
-              audioChunks.push(payload);
             }
+          } else if (opcode === 0x08) {
+            // 关闭帧
+            socket.end();
           }
         }
       });
@@ -242,15 +423,8 @@ app.post('/api/tts', async (req, res) => {
         }
 
         const audioBuffer = Buffer.concat(audioChunks);
-        const firstBytes = audioBuffer.slice(0, 20).toString('utf8');
-        if (firstBytes.includes('{') || firstBytes.includes('error')) {
-          if (!res.headersSent) {
-            res.status(500).json({ error: '音频数据包含错误信息: ' + audioBuffer.toString('utf8').substring(0, 200) });
-          }
-          return;
-        }
-
         const base64Audio = audioBuffer.toString('base64');
+
         if (!res.headersSent) {
           res.json({
             audio: base64Audio,
