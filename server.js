@@ -85,6 +85,7 @@ app.post('/api/tts', async (req, res) => {
       return res.status(500).json({ error: 'TTS 配置不完整，请检查环境变量' });
     }
 
+    console.log('🔊 TTS 接口被调用，使用的是手动 WebSocket 实现 v2');
     const https = await import('https');
     const crypto = await import('crypto');
     const connectId = crypto.randomUUID();
