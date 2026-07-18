@@ -91,12 +91,14 @@ app.post('/api/tts', async (req, res) => {
     const url = 'wss://openspeech.bytedance.com/api/v3/tts/bidirection';
     const connectId = Date.now().toString(36) + Math.random().toString(36).substr(2, 6);
 
-    const ws = new WebSocket(url, {
+       const ws = new WebSocket(url, {
       headers: {
         'X-Api-Key': apiKey,
         'X-Api-Resource-Id': 'seed-icl-2.0',
         'X-Api-Connect-Id': connectId,
-      }
+      },
+      // 指定使用 WebSocket 协议版本 8（火山引擎要求）
+      protocolVersion: 8,
     });
 
     let audioChunks = [];
