@@ -156,6 +156,10 @@ app.post('/api/tts', async (req, res) => {
             ws.send(JSON.stringify({ EventType: 'FinishConnection' }));
           } else if (msg.EventType === 'ConnectionFinished') {
             ws.close();
+              } else if (msg.EventType === 'ConnectionFailed') {
+            // 新增：捕获连接失败事件
+            errorMessage = msg.Payload?.message || '连接失败';
+            ws.close();
           } else if (msg.EventType === 'SessionFailed') {
             errorMessage = msg.Payload?.message || 'TTS 合成失败';
             ws.close();
@@ -193,7 +197,22 @@ app.post('/api/tts', async (req, res) => {
         return;
       }
 
-            try {
+      // 校验音频数据：检查是否混入了 JSON 错误文本
+      const hasJsonError = audioChunks.some(chunk => {
+        try {
+          const text = chunk.toString('utf8').trim();
+          return text.startsWith('{') || text.startsWith('[');
+        } catch { return false; }
+      });
+
+      if (hasJsonError) {
+        if (!res.headersSent) {
+          res.status(500).json({ error: '音频数据包含错误信息，TTS 可能未正确返回音频' });
+        }
+        return;
+      }
+
+      try {
         const audioBuffer = Buffer.concat(audioChunks);
         const base64Audio = audioBuffer.toString('base64');
 
