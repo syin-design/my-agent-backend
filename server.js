@@ -75,6 +75,8 @@ app.put('/api/settings', async (req, res) => {
 // ========== 语音合成接口 (火山引擎官方二进制帧协议) ==========
 app.post('/api/tts', async (req, res) => {
   try {
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        
     const { text } = req.body;
     if (!text || text.length > 1000) return res.status(400).json({ error: '文本为空或过长' });
 
