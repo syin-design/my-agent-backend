@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import { createClient } from '@supabase/supabase-js';
+import { v4 as uuidv4 } from 'uuid';
 
 
 const app = express();
@@ -89,16 +90,16 @@ app.post('/api/tts', async (req, res) => {
     // 动态导入 WebSocket
     const WebSocket = (await import('ws')).default;
     const url = 'wss://openspeech.bytedance.com/api/v3/tts/bidirection';
-    const connectId = Date.now().toString(36) + Math.random().toString(36).substr(2, 6);
+    const connectId = uuidv4();
+
 
        const ws = new WebSocket(url, {
       headers: {
         'X-Api-Key': apiKey,
         'X-Api-Resource-Id': 'seed-icl-2.0',
         'X-Api-Connect-Id': connectId,
+        'X-Control-Require-Usage-Tokens-Return': '*',
       },
-      // 指定使用 WebSocket 协议版本 8（火山引擎要求）
-      protocolVersion: 8,
     });
 
     let audioChunks = [];
