@@ -490,23 +490,127 @@ app.post('/api/chat', async (req, res) => {
       content: message
     });
 
-    // ----- 3. 加载历史消息（最近20轮）-----
-    const { data: historyMessages } = await supabase
+        // ----- 3. 加载历史消息（加载全部可见消息，后续动态裁剪）-----
+    const { data: allHistory } = await supabase
       .from('messages')
-      .select('role, content')
+      .select('id, role, content, created_at')
       .eq('sessionid', currentSessionId)
       .eq('visible', true)
       .order('created_at', { ascending: true })
-      .limit(40); // 20轮 = 40条（用户+AI交替）
+      .limit(200); // 最多取200条，防止查询过重
 
-    // ----- 4. 获取系统设置 -----
+    // ----- 4. 获取系统设置（含压缩参数）-----
     const settings = await getSettings();
+    // 从 settings 表中读取压缩相关参数（若不存在则使用默认值）
+    const maxContextTokens = settings.max_context_tokens || 4000;
+    const compressThreshold = settings.compress_threshold_tokens || 3000;
+    const compressKeepRounds = settings.compress_keep_rounds || 5;
 
-    // ----- 5. 组装上下文 -----
+    // ----- 4.5 记忆压缩 -----
+    let historyMessages = allHistory || [];
+    // 粗略估算 token 数（中文约 1 token/字，英文约 1.3 token/字，这里用字符数*0.5）
+    const estimatedTokens = JSON.stringify(historyMessages.map(m => m.content)).length * 0.5;
+
+    if (estimatedTokens > compressThreshold && historyMessages.length > compressKeepRounds * 2) {
+      // 分离旧消息和近期消息
+      const keepCount = compressKeepRounds * 2; // 保留最近 N 轮（用户+AI 各一条）
+      const oldMessages = historyMessages.slice(0, -keepCount);
+      const recentMessages = historyMessages.slice(-keepCount);
+
+      if (oldMessages.length > 0) {
+        try {
+          const deepseekKey = process.env.DEEPSEEK_API_KEY;
+          if (deepseekKey) {
+            // 构建压缩提示
+            const conversationText = oldMessages
+              .map(m => `${m.role === 'user' ? '用户' : 'AI'}: ${m.content}`)
+              .join('\n');
+            const summaryPrompt = `请将以下对话历史压缩成一段简短的摘要，保留关键信息和上下文：\n${conversationText}`;
+
+            // 调用 DeepSeek API（OpenAI 兼容接口）
+            const summaryRes = await fetch('https://api.deepseek.com/v1/chat/completions', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${deepseekKey}`
+              },
+              body: JSON.stringify({
+                model: 'deepseek-chat',
+                messages: [{ role: 'user', content: summaryPrompt }],
+                max_tokens: 200,
+                temperature: 0.3,
+              })
+            });
+
+            if (summaryRes.ok) {
+              const summaryData = await summaryRes.json();
+              const summary = summaryData.choices?.[0]?.message?.content || '';
+
+              if (summary) {
+                // 将摘要存入 memories 表
+                await supabase.from('memories').insert({
+                  summary: summary,
+                  conversation_id: currentSessionId,
+                  timestamp: new Date()
+                });
+
+                // 标记旧消息为不可见（通过 id 精确更新）
+                const oldIds = oldMessages.map(m => m.id);
+                if (oldIds.length > 0) {
+                  await supabase.from('messages')
+                    .update({ visible: false })
+                    .in('id', oldIds);
+                }
+
+                // 替换历史消息为近期消息
+                historyMessages = recentMessages;
+              }
+            }
+          }
+        } catch (compressError) {
+          console.error('记忆压缩失败，将使用原始历史:', compressError);
+          // 压缩失败不影响主流程，继续使用原始历史
+        }
+      }
+    }
+
+    // ----- 5. 组装上下文（三层：系统提示词 + 记忆摘要 + 近期消息）-----
+    // 加载最新的记忆摘要（从 memories 表取最近3条）
+    const { data: memories } = await supabase
+      .from('memories')
+      .select('summary')
+      .order('timestamp', { ascending: false })
+      .limit(3);
+
+    const memorySummaries = memories?.map(m => m.summary) || [];
+
+    // 构建消息数组
     const messagesForAI = [
       { role: 'system', content: settings.system_prompt },
-      ...(historyMessages || []).map(m => ({ role: m.role, content: m.content }))
+      // 中间层：记忆摘要（如果有）
+      ...(memorySummaries.length > 0
+        ? [{ role: 'system', content: '【之前的对话摘要】\n' + memorySummaries.join('\n') }]
+        : []),
+      // 底层：近期历史消息
+      ...historyMessages.map(m => ({ role: m.role, content: m.content }))
     ];
+
+    // 控制上下文总 token 量（简单裁剪，保证不超过最大限制）
+    while (
+      JSON.stringify(messagesForAI.map(m => m.content)).length > maxContextTokens * 2 &&
+      messagesForAI.length > 3 // 保留系统提示词和至少一轮对话
+    ) {
+      // 移除最旧的一条聊天消息（不删系统提示词和摘要）
+      let removed = false;
+      for (let i = 0; i < messagesForAI.length; i++) {
+        if (messagesForAI[i].role !== 'system') {
+          messagesForAI.splice(i, 1);
+          removed = true;
+          break;
+        }
+      }
+      if (!removed) break; // 防止死循环
+    }
 
     // ----- 6. 调用豆包 API -----
     const response = await fetch('https://ark.cn-beijing.volces.com/api/v3/chat/completions', {
