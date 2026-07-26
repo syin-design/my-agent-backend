@@ -611,8 +611,7 @@ app.post('/api/chat', async (req, res) => {
       }
       if (!removed) break; // 防止死循环
     }
-
-    // ----- 6. 调用豆包 API -----
+    // ----- 6. 调用豆包 API（流式）-----
     const response = await fetch('https://ark.cn-beijing.volces.com/api/v3/chat/completions', {
       method: 'POST',
       headers: {
@@ -622,34 +621,68 @@ app.post('/api/chat', async (req, res) => {
       body: JSON.stringify({
         model: modelId,
         messages: messagesForAI,
-        stream: false,
+        stream: true,                         // ← 开启流式
         max_tokens: settings.max_reply_tokens || 1024,
         temperature: settings.temperature || 0.7
       })
     });
 
-    const data = await response.json();
     if (!response.ok) {
-      throw new Error(data.error?.message || '豆包 API 调用失败');
+      const errData = await response.json().catch(() => ({}));
+      throw new Error(errData.error?.message || '豆包 API 调用失败');
     }
 
-    const reply = data.choices?.[0]?.message?.content || '（未收到有效回复）';
+    // 设置 SSE 响应头
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
 
-    // ----- 7. 存入 AI 回复 -----
-    await supabase.from('messages').insert({
-      sessionid: currentSessionId,
-      role: 'assistant',
-      content: reply
-    });
+    let fullReply = '';
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
 
-    // ----- 8. 更新会话时间 -----
-    await supabase.from('sessions').update({ updated_at: new Date() }).eq('id', currentSessionId);
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value, { stream: true });
+        const lines = chunk.split('\n').filter(l => l.startsWith('data:'));
+        for (const line of lines) {
+          const json = line.slice(5).trim();
+          if (json === '[DONE]') continue;
+          try {
+            const parsed = JSON.parse(json);
+            const delta = parsed.choices?.[0]?.delta?.content;
+            if (delta) {
+              fullReply += delta;
+              res.write(`data: ${JSON.stringify({ delta })}\n\n`);
+            }
+          } catch (e) { /* 忽略解析错误 */ }
+        }
+      }
+    } catch (streamError) {
+      console.error('流式读取错误:', streamError);
+      res.write(`data: ${JSON.stringify({ error: '流式传输中断' })}\n\n`);
+    }
 
-    // ----- 9. 返回结果 -----
-    res.json({ reply, sessionId: currentSessionId });
+    res.write('data: [DONE]\n\n');
+    res.end();
+
+        // ----- 7. 存入 AI 回复（完整文本）-----
+    if (fullReply) {
+      await supabase.from('messages').insert({
+        sessionid: currentSessionId,
+        role: 'assistant',
+        content: fullReply
+      });
+      await supabase.from('sessions').update({ updated_at: new Date() }).eq('id', currentSessionId);
+    }
   } catch (error) {
     console.error('聊天接口出错:', error);
-    res.status(500).json({ error: error.message || 'AI 服务暂时不可用' });
+    if (!res.headersSent) {
+      res.status(500).json({ error: error.message || 'AI 服务暂时不可用' });
+    }
   }
 });
 
@@ -688,7 +721,6 @@ app.patch('/api/sessions/:id', async (req, res) => {
 // ========== 删除会话（同时删除其下所有消息） ==========
 app.delete('/api/sessions/:id', async (req, res) => {
   const { id } = req.params;
-  // 先删消息，再删会话
   await supabase.from('messages').delete().eq('sessionid', id);
   const { error } = await supabase.from('sessions').delete().eq('id', id);
   if (error) return res.status(500).json({ error: error.message });
