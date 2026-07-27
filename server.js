@@ -12,6 +12,7 @@ const supabase = createClient(
 );
 
 app.use(cors());
+app.options('*', cors());
 app.use(express.json());
 
 // ========== 健康检查 ==========
