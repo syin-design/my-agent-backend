@@ -611,25 +611,59 @@ app.post('/api/chat', async (req, res) => {
       }
       if (!removed) break; // 防止死循环
     }
-    // ----- 6. 调用豆包 API（流式）-----
-    const response = await fetch('https://ark.cn-beijing.volces.com/api/v3/chat/completions', {
-      method: 'POST',
-      headers: {
+        // ----- 6. 调用模型 API（流式，支持多模型切换）-----
+    const requestedModel = req.body.model || 'doubao';  // 默认豆包
+
+    let apiUrl, apiHeaders, apiBody;
+
+    if (requestedModel === 'deepseek') {
+      // DeepSeek API
+      const deepseekKey = process.env.DEEPSEEK_API_KEY;
+      if (!deepseekKey) {
+        return res.status(500).json({ error: 'DeepSeek API Key 未配置' });
+      }
+      apiUrl = 'https://api.deepseek.com/v1/chat/completions';
+      apiHeaders = {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
-      },
-      body: JSON.stringify({
-        model: modelId,
+        'Authorization': `Bearer ${deepseekKey}`
+      };
+      apiBody = {
+        model: 'deepseek-chat',
         messages: messagesForAI,
-        stream: true,                         // ← 开启流式
+        stream: true,
         max_tokens: settings.max_reply_tokens || 1024,
         temperature: settings.temperature || 0.7
-      })
+      };
+    } else {
+      // 默认豆包
+      const doubaoKey = process.env.DOUBAO_API_KEY;
+      const doubaoModelId = process.env.DOUBAO_MODEL_ID;
+      if (!doubaoKey || !doubaoModelId) {
+        return res.status(500).json({ error: '豆包 API Key 或模型 ID 未配置' });
+      }
+      apiUrl = 'https://ark.cn-beijing.volces.com/api/v3/chat/completions';
+      apiHeaders = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${doubaoKey}`
+      };
+      apiBody = {
+        model: doubaoModelId,
+        messages: messagesForAI,
+        stream: true,
+        max_tokens: settings.max_reply_tokens || 1024,
+        temperature: settings.temperature || 0.7
+      };
+    }
+
+    const response = await fetch(apiUrl, {
+      method: 'POST',
+      headers: apiHeaders,
+      body: JSON.stringify(apiBody)
     });
 
-    if (!response.ok) {
+        if (!response.ok) {
       const errData = await response.json().catch(() => ({}));
-      throw new Error(errData.error?.message || '豆包 API 调用失败');
+      throw new Error(errData.error?.message || `API 请求失败 (${response.status})`);
     }
 
     // 设置 SSE 响应头
