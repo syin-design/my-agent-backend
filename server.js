@@ -509,6 +509,22 @@ app.post('/api/chat', async (req, res) => {
 
     // ----- 4.5 记忆压缩 -----
     let historyMessages = allHistory || [];
+
+        // 处理重新生成 / 编辑重发
+    if (req.body.regenerate && historyMessages.length > 0) {
+      // 移除最后一条 AI 回复
+      for (let i = historyMessages.length - 1; i >= 0; i--) {
+        if (historyMessages[i].role === 'assistant') {
+          historyMessages.splice(i, 1);
+          break;
+        }
+      }
+    }
+    if (req.body.truncateAfterId) {
+      // 只保留指定 ID 之前的消息（编辑消息位置之前）
+      historyMessages = historyMessages.filter(m => m.id < req.body.truncateAfterId);
+    }
+
     // 粗略估算 token 数（中文约 1 token/字，英文约 1.3 token/字，这里用字符数*0.5）
     const estimatedTokens = JSON.stringify(historyMessages.map(m => m.content)).length * 0.5;
 
@@ -585,9 +601,24 @@ app.post('/api/chat', async (req, res) => {
 
     const memorySummaries = memories?.map(m => m.summary) || [];
 
+        // 加载最新的优秀示例（最近5条）
+    const { data: examples } = await supabase
+      .from('good_examples')
+      .select('user_content, ai_content')
+      .order('created_at', { ascending: false })
+      .limit(5);
+
+    let exampleText = '';
+    if (examples && examples.length > 0) {
+      exampleText = '\n\n以下是你之前被评价为优秀的回复示例，请严格参考这种风格回答：\n';
+      examples.reverse().forEach(ex => {
+        exampleText += `用户: ${ex.user_content}\nAI: ${ex.ai_content}\n`;
+      });
+    }
+    
     // 构建消息数组
     const messagesForAI = [
-      { role: 'system', content: settings.system_prompt },
+      { role: 'system', content: settings.system_prompt + exampleText },
       // 中间层：记忆摘要（如果有）
       ...(memorySummaries.length > 0
         ? [{ role: 'system', content: '【之前的对话摘要】\n' + memorySummaries.join('\n') }]
@@ -760,6 +791,43 @@ app.delete('/api/sessions/:id', async (req, res) => {
   const { error } = await supabase.from('sessions').delete().eq('id', id);
   if (error) return res.status(500).json({ error: error.message });
   res.json({ success: true });
+});
+
+// ========== 保存优秀示例 ==========
+app.post('/api/good-examples', async (req, res) => {
+  try {
+    const { sessionId, aiContent } = req.body;
+    if (!sessionId || !aiContent) {
+      return res.status(400).json({ error: '缺少 sessionId 或 aiContent' });
+    }
+
+    // 找到该 AI 回复之前的最近一条用户消息
+    const { data: userMsg } = await supabase
+      .from('messages')
+      .select('content')
+      .eq('sessionid', sessionId)
+      .eq('role', 'user')
+      .lt('created_at', new Date().toISOString())
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+
+    if (!userMsg) {
+      return res.status(404).json({ error: '未找到对应的用户消息' });
+    }
+
+    const { error } = await supabase.from('good_examples').insert({
+      sessionid: sessionId,
+      user_content: userMsg.content,
+      ai_content: aiContent,
+    });
+
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) {
+    console.error('保存示例失败:', error);
+    res.status(500).json({ error: error.message });
+  }
 });
 
 app.listen(PORT, () => {
