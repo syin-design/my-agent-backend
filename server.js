@@ -484,12 +484,14 @@ app.post('/api/chat', async (req, res) => {
       currentSessionId = newSession.id;
     }
 
-    // ----- 2. 存入用户消息 -----
-    await supabase.from('messages').insert({
-      sessionid: currentSessionId,
-      role: 'user',
-      content: message
-    });
+    // ----- 2. 存入用户消息（如果是重新生成，跳过，因为用户消息已经存在）-----
+if (!req.body.regenerate) {
+  await supabase.from('messages').insert({
+    sessionid: currentSessionId,
+    role: 'user',
+    content: message
+  });
+}
 
         // ----- 3. 加载历史消息（加载全部可见消息，后续动态裁剪）-----
     const { data: allHistory } = await supabase
