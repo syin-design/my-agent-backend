@@ -514,17 +514,30 @@ if (!req.body.regenerate) {
 
         // 处理重新生成 / 编辑重发
     if (req.body.regenerate && historyMessages.length > 0) {
-      // 移除最后一条 AI 回复
+      // 移除最后一条 AI 回复，并在数据库中标记为不可见
+      let regeneratedMessageId = null;
       for (let i = historyMessages.length - 1; i >= 0; i--) {
         if (historyMessages[i].role === 'assistant') {
+          regeneratedMessageId = historyMessages[i].id;
           historyMessages.splice(i, 1);
           break;
         }
       }
+      if (regeneratedMessageId) {
+        await supabase.from('messages')
+          .update({ visible: false })
+          .eq('id', regeneratedMessageId);
+      }
     }
     if (req.body.truncateAfterId) {
       // 只保留指定 ID 之前的消息（编辑消息位置之前）
-      historyMessages = historyMessages.filter(m => m.id < req.body.truncateAfterId);
+      const cutoffId = req.body.truncateAfterId;
+      historyMessages = historyMessages.filter(m => m.id < cutoffId);
+      // 把该 ID 及之后所有旧消息标记为不可见
+      await supabase.from('messages')
+        .update({ visible: false })
+        .eq('sessionid', currentSessionId)
+        .gte('id', cutoffId);
     }
 
     // 粗略估算 token 数（中文约 1 token/字，英文约 1.3 token/字，这里用字符数*0.5）
