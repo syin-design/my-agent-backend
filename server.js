@@ -614,12 +614,13 @@ if (!req.body.regenerate) {
       .order('timestamp', { ascending: false })
       .limit(3);
 
-    const memorySummaries = memories?.map(m => m.summary) || [];
+   const memorySummaries = memories?.map(m => m.summary).reverse() || [];
 
-        // 加载最新的优秀示例（最近5条）
+   // 加载当前会话的优秀示例（最近5条），避免跨会话串场景
     const { data: examples } = await supabase
       .from('good_examples')
       .select('user_content, ai_content')
+      .eq('sessionid', currentSessionId)
       .order('created_at', { ascending: false })
       .limit(5);
 
