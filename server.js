@@ -590,17 +590,12 @@ if (!req.body.regenerate) {
     }
 
     // 若发生重新生成/编辑重发，立即用过滤后的最新历史重新生成场景状态，
-    // 确保本轮回复不会继续读取到被撤销的旧内容
+    // 确保本轮回复不会继续读取到被撤销的旧内容。
+    // 注意：这种情况下旧状态直接丢弃，不归档进 memories 表——
+    // 因为旧状态里可能包含了被用户否定/撤销的剧情，不应该被长期保留。
     if (forceStateRefresh) {
       const newStateText = await generateSceneState(historyMessages);
       if (newStateText) {
-        if (sceneStateRow?.state_text) {
-          await supabase.from('memories').insert({
-            summary: '[场景状态归档] ' + sceneStateRow.state_text,
-            conversation_id: currentSessionId,
-            timestamp: sceneStateRow.updated_at || new Date()
-          });
-        }
         await supabase.from('scene_state').upsert({
           session_id: currentSessionId,
           state_text: newStateText,
