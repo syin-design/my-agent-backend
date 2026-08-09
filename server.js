@@ -34,6 +34,45 @@ async function getSettings() {
     max_reply_tokens: 1024
   };
 }
+// ========== 辅助函数：生成场景状态 ==========
+async function generateSceneState(historyForState) {
+  const deepseekKey = process.env.DEEPSEEK_API_KEY;
+  if (!deepseekKey) return null;
+
+  const recentText = historyForState
+    .slice(-10)
+    .map(m => `${m.role === 'user' ? '用户' : 'AI'}: ${m.content}`)
+    .join('\n');
+
+  const statePrompt = `请阅读以下最近的对话，提炼出"当前场景状态"，严格按以下格式输出，总字数不超过200字，信息不足的部分可以简写，不要为了凑字数编造内容：
+事实：[时间/地点/在场人物/上一步发生的具体动作和结果，保留"已经""还没""正在"等能体现先后顺序的词]
+情感基调：[一句话内，描述当前氛围和人物情绪基调]
+
+对话内容：
+${recentText}`;
+
+  try {
+    const stateRes = await fetch('https://api.deepseek.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${deepseekKey}`
+      },
+      body: JSON.stringify({
+        model: 'deepseek-chat',
+        messages: [{ role: 'user', content: statePrompt }],
+        max_tokens: 300,
+        temperature: 0.3,
+      })
+    });
+    if (!stateRes.ok) return null;
+    const stateData = await stateRes.json();
+    return stateData.choices?.[0]?.message?.content?.trim() || null;
+  } catch (e) {
+    console.error('生成场景状态失败:', e);
+    return null;
+  }
+}
 
 // ========== 获取设置接口 ==========
 app.get('/api/settings', async (req, res) => {
@@ -550,6 +589,28 @@ if (!req.body.regenerate) {
       forceStateRefresh = true;
     }
 
+    // 若发生重新生成/编辑重发，立即用过滤后的最新历史重新生成场景状态，
+    // 确保本轮回复不会继续读取到被撤销的旧内容
+    if (forceStateRefresh) {
+      const newStateText = await generateSceneState(historyMessages);
+      if (newStateText) {
+        if (sceneStateRow?.state_text) {
+          await supabase.from('memories').insert({
+            summary: '[场景状态归档] ' + sceneStateRow.state_text,
+            conversation_id: currentSessionId,
+            timestamp: sceneStateRow.updated_at || new Date()
+          });
+        }
+        await supabase.from('scene_state').upsert({
+          session_id: currentSessionId,
+          state_text: newStateText,
+          updated_at: new Date(),
+          turn_count: 0
+        }, { onConflict: 'session_id' });
+        sceneStateRow = { ...sceneStateRow, state_text: newStateText, turn_count: 0 };
+      }
+    }
+
     // 粗略估算 token 数（中文约 1 token/字，英文约 1.3 token/字，这里用字符数*0.5）
     const estimatedTokens = JSON.stringify(historyMessages.map(m => m.content)).length * 0.5;
 
@@ -774,13 +835,13 @@ if (!req.body.regenerate) {
       });
       await supabase.from('sessions').update({ updated_at: new Date() }).eq('id', currentSessionId);
 
-      // ----- 7.5 场景状态刷新（每5轮触发一次，用户+AI合计为1轮）-----
-      try {
-        const newTurnCount = (sceneStateRow?.turn_count || 0) + 1;
+     // ----- 7.5 场景状态刷新（每5轮触发一次，用户+AI合计为1轮）-----
+      // 若本轮已经因为重新生成/编辑重发强制刷新过，这里只需正常计数，不重复刷新
+      if (!forceStateRefresh) {
+        try {
+          const newTurnCount = (sceneStateRow?.turn_count || 0) + 1;
 
-       if (newTurnCount >= 5 || forceStateRefresh) {
-          const deepseekKey = process.env.DEEPSEEK_API_KEY;
-          if (deepseekKey) {
+          if (newTurnCount >= 5) {
             const { data: recentForState } = await supabase
               .from('messages')
               .select('role, content, created_at')
@@ -789,66 +850,36 @@ if (!req.body.regenerate) {
               .order('created_at', { ascending: false })
               .limit(10);
 
-            const recentText = (recentForState || [])
-              .reverse()
-              .map(m => `${m.role === 'user' ? '用户' : 'AI'}: ${m.content}`)
-              .join('\n');
+            const historyForState = (recentForState || []).reverse();
+            const newStateText = await generateSceneState(historyForState);
 
-            const statePrompt = `请阅读以下最近的对话，提炼出"当前场景状态"，严格按以下格式输出，总字数不超过200字，信息不足的部分可以简写，不要为了凑字数编造内容：
-事实：[时间/地点/在场人物/上一步发生的具体动作和结果，保留"已经""还没""正在"等能体现先后顺序的词]
-情感基调：[一句话内，描述当前氛围和人物情绪基调]
-
-对话内容：
-${recentText}`;
-
-            const stateRes = await fetch('https://api.deepseek.com/v1/chat/completions', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${deepseekKey}`
-              },
-              body: JSON.stringify({
-                model: 'deepseek-chat',
-                messages: [{ role: 'user', content: statePrompt }],
-                max_tokens: 300,
-                temperature: 0.3,
-              })
-            });
-
-            if (stateRes.ok) {
-              const stateData = await stateRes.json();
-              const newStateText = stateData.choices?.[0]?.message?.content?.trim();
-
-              if (newStateText) {
-                if (sceneStateRow?.state_text) {
-                  await supabase.from('memories').insert({
-                    summary: '[场景状态归档] ' + sceneStateRow.state_text,
-                    conversation_id: currentSessionId,
-                    timestamp: sceneStateRow.updated_at || new Date()
-                  });
-                }
-
-                await supabase.from('scene_state').upsert({
-                  session_id: currentSessionId,
-                  state_text: newStateText,
-                  updated_at: new Date(),
-                  turn_count: 0
-                }, { onConflict: 'session_id' });
+            if (newStateText) {
+              if (sceneStateRow?.state_text) {
+                await supabase.from('memories').insert({
+                  summary: '[场景状态归档] ' + sceneStateRow.state_text,
+                  conversation_id: currentSessionId,
+                  timestamp: sceneStateRow.updated_at || new Date()
+                });
               }
+              await supabase.from('scene_state').upsert({
+                session_id: currentSessionId,
+                state_text: newStateText,
+                updated_at: new Date(),
+                turn_count: 0
+              }, { onConflict: 'session_id' });
             }
+          } else {
+            await supabase.from('scene_state').upsert({
+              session_id: currentSessionId,
+              state_text: sceneStateRow?.state_text || null,
+              updated_at: sceneStateRow?.updated_at || new Date(),
+              turn_count: newTurnCount
+            }, { onConflict: 'session_id' });
           }
-        } else {
-          await supabase.from('scene_state').upsert({
-            session_id: currentSessionId,
-            state_text: sceneStateRow?.state_text || null,
-            updated_at: sceneStateRow?.updated_at || new Date(),
-            turn_count: newTurnCount
-          }, { onConflict: 'session_id' });
+        } catch (sceneStateError) {
+          console.error('场景状态刷新失败:', sceneStateError);
         }
-      } catch (sceneStateError) {
-        console.error('场景状态刷新失败:', sceneStateError);
       }
-    }
   } catch (error) {
     console.error('聊天接口出错:', error);
     if (!res.headersSent) {
