@@ -516,8 +516,9 @@ if (!req.body.regenerate) {
       .eq('session_id', currentSessionId)
       .maybeSingle();
 
-    // ----- 4.5 记忆压缩 -----
+   // ----- 4.5 记忆压缩 -----
     let historyMessages = allHistory || [];
+    let forceStateRefresh = false; // 发生重新生成/编辑重发时，强制刷新场景状态
 
         // 处理重新生成 / 编辑重发
     if (req.body.regenerate && historyMessages.length > 0) {
@@ -534,6 +535,7 @@ if (!req.body.regenerate) {
         await supabase.from('messages')
           .update({ visible: false })
           .eq('id', regeneratedMessageId);
+        forceStateRefresh = true;
       }
     }
     if (req.body.truncateAfterId) {
@@ -545,6 +547,7 @@ if (!req.body.regenerate) {
         .update({ visible: false })
         .eq('sessionid', currentSessionId)
         .gte('id', cutoffId);
+      forceStateRefresh = true;
     }
 
     // 粗略估算 token 数（中文约 1 token/字，英文约 1.3 token/字，这里用字符数*0.5）
@@ -775,7 +778,7 @@ if (!req.body.regenerate) {
       try {
         const newTurnCount = (sceneStateRow?.turn_count || 0) + 1;
 
-        if (newTurnCount >= 5) {
+       if (newTurnCount >= 5 || forceStateRefresh) {
           const deepseekKey = process.env.DEEPSEEK_API_KEY;
           if (deepseekKey) {
             const { data: recentForState } = await supabase
