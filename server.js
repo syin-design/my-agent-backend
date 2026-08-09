@@ -880,6 +880,7 @@ if (!req.body.regenerate) {
           console.error('场景状态刷新失败:', sceneStateError);
         }
       }
+    }
   } catch (error) {
     console.error('聊天接口出错:', error);
     if (!res.headersSent) {
