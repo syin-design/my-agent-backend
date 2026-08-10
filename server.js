@@ -690,9 +690,9 @@ if (!req.body.regenerate) {
       .order('created_at', { ascending: false })
       .limit(5);
 
-    let exampleText = '';
+   let exampleText = '';
     if (examples && examples.length > 0) {
-      exampleText = '\n\n以下是你之前被评价为优秀的回复示例，请严格参考这种风格回答：\n';
+      exampleText = '\n\n以下是你之前被认可的回复示例，仅供参考语气、文笔风格和叙事节奏。注意：这些示例中的具体情节、动作、台词、场景细节均属于历史内容，已经发生过，不要在新的回复中重复、复述或延续这些具体内容——只学习"怎么写"，不要复制"写了什么"：\n';
       examples.reverse().forEach(ex => {
         exampleText += `用户: ${ex.user_content}\nAI: ${ex.ai_content}\n`;
       });
