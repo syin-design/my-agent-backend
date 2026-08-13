@@ -698,18 +698,22 @@ if (!req.body.regenerate) {
       });
     }
     
-        // 构建消息数组
+        // 构建消息数组（合并为单条system消息，避免多条system被模型分散处理）
+    let systemContent = settings.system_prompt + exampleText;
+
+    if (memorySummaries.length > 0) {
+      systemContent += '\n\n【之前的对话摘要】\n' + memorySummaries.join('\n');
+    }
+
+    if (sceneStateRow?.state_text) {
+      systemContent += '\n\n【当前场景状态】\n' + sceneStateRow.state_text;
+    }
+
+    systemContent += '\n\n【重要】以上摘要和场景状态仅供背景参考，不能替代你对用户最新发言的回应。你的首要任务是针对下方对话中用户最后一条消息的具体内容做出直接、切题的反应；如果用户最新发言的方向和场景状态描述的不一样，以用户最新发言为准，不要忽略或延迟回应用户刚说的话。';
+
     const messagesForAI = [
-      { role: 'system', content: settings.system_prompt + exampleText },
-      // 中间层：记忆摘要（如果有）
-      ...(memorySummaries.length > 0
-        ? [{ role: 'system', content: '【之前的对话摘要】\n' + memorySummaries.join('\n') }]
-        : []),
-      // 当前场景状态（如果有）
-      ...(sceneStateRow?.state_text
-        ? [{ role: 'system', content: '【当前场景状态】\n' + sceneStateRow.state_text }]
-        : []),
-      // 底层：近期历史消息
+      { role: 'system', content: systemContent },
+      // 历史消息（含用户最新一条）
       ...historyMessages.map(m => ({ role: m.role, content: m.content }))
     ];
 
