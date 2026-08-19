@@ -505,12 +505,7 @@ app.post('/api/tts', async (req, res) => {
 app.post('/api/chat', async (req, res) => {
   try {
     const { message, sessionId } = req.body;
-    const apiKey = process.env.DOUBAO_API_KEY;
-    const modelId = process.env.DOUBAO_MODEL_ID;
-
-    if (!apiKey || !modelId) {
-      return res.status(500).json({ error: '豆包 API Key 或模型 ID 未配置' });
-    }
+    const requestedModel = req.body.model || 'doubao'; // 默认豆包
 
     // ----- 1. 如果没有 sessionId，自动创建新会话 -----
     let currentSessionId = sessionId;
@@ -734,8 +729,6 @@ if (!req.body.regenerate) {
       if (!removed) break; // 防止死循环
     }
         // ----- 6. 调用模型 API（流式，支持多模型切换）-----
-    const requestedModel = req.body.model || 'doubao';  // 默认豆包
-
     let apiUrl, apiHeaders, apiBody;
 
     if (requestedModel === 'deepseek') {
@@ -751,6 +744,24 @@ if (!req.body.regenerate) {
       };
       apiBody = {
         model: 'deepseek-chat',
+        messages: messagesForAI,
+        stream: true,
+        max_tokens: settings.max_reply_tokens || 1024,
+        temperature: settings.temperature || 0.7
+      };
+    } else if (requestedModel === 'gemini') {
+      // Gemini API（OpenAI 兼容接口）
+      const geminiKey = process.env.GEMINI_API_KEY;
+      if (!geminiKey) {
+        return res.status(500).json({ error: 'Gemini API Key 未配置' });
+      }
+      apiUrl = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
+      apiHeaders = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${geminiKey}`
+      };
+      apiBody = {
+        model: 'gemini-1.5-flash', // 免费额度较高的模型
         messages: messagesForAI,
         stream: true,
         max_tokens: settings.max_reply_tokens || 1024,
