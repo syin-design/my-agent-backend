@@ -761,7 +761,7 @@ if (!req.body.regenerate) {
         'Authorization': `Bearer ${geminiKey}`
       };
       apiBody = {
-        model: 'gemini-2.5-flash', // 免费额度较高的模型
+        model: 'gemini-3.6-flash', // 免费额度较高的模型
         messages: messagesForAI,
         stream: true,
         max_tokens: settings.max_reply_tokens || 1024,
