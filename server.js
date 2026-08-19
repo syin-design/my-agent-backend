@@ -796,6 +796,7 @@ if (!req.body.regenerate) {
 
         if (!response.ok) {
       const errData = await response.json().catch(() => ({}));
+      console.error('模型API返回错误详情:', JSON.stringify(errData));
       throw new Error(errData.error?.message || `API 请求失败 (${response.status})`);
     }
 
